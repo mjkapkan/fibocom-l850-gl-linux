@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Cellular LTE Tray Indicator
+Comment=System Tray Indicator for Fibocom L850-GL / Intel XMM7360 Cellular Connection
+Exec=/usr/local/bin/cellular-tray.py
+Icon=network-cellular-connected-symbolic
+Terminal=false
+Categories=Network;System;
+X-KDE-autostart-after=panel
