@@ -9,7 +9,7 @@ Includes:
 - **PCIe Runtime Power Management Fix** (stops the modem firmware from crashing after sleep/resume).
 - **Intelligent Routing:** Configured with route metric `700` so your system automatically uses Wi-Fi when available, and instantly falls back to Cellular LTE when Wi-Fi disconnects.
 - **Native Desktop System Tray Indicator:** Lightweight status applet for KDE Plasma, GNOME, XFCE, and other Freedesktop environments showing live cellular signal bars, IP address, and quick connect/disconnect controls.
-- **100% ISP Agnostic:** Works with any mobile carrier worldwide.
+- **ISP agnostic:** Works with any mobile carrier worldwide.
 
 ---
 
