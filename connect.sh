@@ -17,12 +17,25 @@ echo "=================================================="
 echo "Connecting to Cellular (Fibocom L850-GL / XMM7360)"
 echo "=================================================="
 
-# Function: Hardware ACPI reset for PCI slot if stuck in A-CD_READY after sleep
-reset_modem_hardware() {
-  echo "Modem is in unresponsive / crashed phase (A-CD_READY). Triggering PCIe ACPI reset..."
-  SLOT=$(lspci -Dn -d 8086:7360 2>/dev/null | cut -f1 -d" " || echo "0000:05:00.0")
-  [ -z "$SLOT" ] && SLOT="0000:05:00.0"
+SLOT=$(lspci -Dn -d 8086:7360 2>/dev/null | cut -f1 -d" " || echo "0000:05:00.0")
+[ -z "$SLOT" ] && SLOT="0000:05:00.0"
 
+# Function: Test if /dev/wwan0xmmrpc0 responds
+check_rpc_port() {
+  python3 -c "
+import os, sys
+try:
+    fd = os.open('/dev/wwan0xmmrpc0', os.O_RDWR)
+    os.close(fd)
+    sys.exit(0)
+except Exception:
+    sys.exit(1)
+" >/dev/null 2>&1
+}
+
+# Function: Safe unbind/bind recovery
+recover_modem() {
+  echo "Attempting driver unbind/bind re-initialization..."
   if [ -d "/sys/bus/pci/drivers/iosm/${SLOT}" ]; then
     echo "${SLOT}" > /sys/bus/pci/drivers/iosm/unbind || true
     sleep 1
@@ -36,7 +49,7 @@ reset_modem_hardware() {
     echo 1 > "/sys/bus/pci/devices/${SLOT}/reset" || true
   fi
 
-  sleep 3
+  sleep 2
   echo "${SLOT}" > /sys/bus/pci/drivers/iosm/bind || true
 
   for i in {1..15}; do
@@ -45,35 +58,43 @@ reset_modem_hardware() {
   done
 }
 
-# Function: Test if /dev/wwan0xmmrpc0 responds or throws EIO
-check_rpc_port() {
-  python3 -c "
-import os, sys
-try:
-    fd = os.open('/dev/wwan0xmmrpc0', os.O_RDWR)
-    os.close(fd)
-    sys.exit(0)
-except Exception:
-    sys.exit(1)
-" >/dev/null 2>&1
-}
+# 1. Ensure system-sleep unbind/bind hook is installed
+if [ ! -f /usr/lib/systemd/system-sleep/wwan-resume ]; then
+  cat << 'EOF' > /usr/lib/systemd/system-sleep/wwan-resume
+#!/bin/bash
+SLOT=$(lspci -Dn -d 8086:7360 2>/dev/null | cut -f1 -d" " || echo "0000:05:00.0")
+[ -z "$SLOT" ] && SLOT="0000:05:00.0"
 
-# 1. Ensure ModemManager does not interfere
+case "$1" in
+  pre)
+    if [ -d "/sys/bus/pci/drivers/iosm/${SLOT}" ]; then
+      echo "${SLOT}" > /sys/bus/pci/drivers/iosm/unbind || true
+    fi
+    ;;
+  post)
+    sleep 2
+    if [ -d "/sys/bus/pci/drivers/iosm" ]; then
+      echo "${SLOT}" > /sys/bus/pci/drivers/iosm/bind || true
+    fi
+    ;;
+esac
+EOF
+  chmod +x /usr/lib/systemd/system-sleep/wwan-resume
+fi
+
+# 2. Ensure ModemManager does not interfere
 systemctl stop ModemManager >/dev/null 2>&1 || true
 systemctl mask ModemManager >/dev/null 2>&1 || true
 
-# 2. Check if device exists and is responsive
-if [ ! -c /dev/wwan0xmmrpc0 ]; then
-  echo "Device /dev/wwan0xmmrpc0 not found. Attempting hardware reset..."
-  reset_modem_hardware
+# 3. Check if device exists and is responsive
+if [ ! -c /dev/wwan0xmmrpc0 ] || ! check_rpc_port; then
+  recover_modem
 fi
 
 if ! check_rpc_port; then
-  reset_modem_hardware
-fi
-
-if ! check_rpc_port; then
-  echo "ERROR: /dev/wwan0xmmrpc0 is unresponsive. A cold power cycle (power off for 10s) may be needed."
+  echo "ERROR: /dev/wwan0xmmrpc0 is currently stuck in A-CD_READY phase."
+  echo "Because the hardware was suspended without the pre-sleep unbind hook,"
+  echo "a one-time cold shutdown (power off completely for 10s) is required to clear it."
   exit 1
 fi
 
@@ -99,7 +120,7 @@ fi
 echo "Using APN: $APN"
 
 # Ensure required python dependencies
-pip3 install pyroute2 configargparse dbus-python >/dev/null 2>&1 || true
+pip3 install pyroute2 configargparse dbus-python --break-system-packages >/dev/null 2>&1 || true
 
 # Execute proprietary RPC connection sequence
 echo "Negotiating cellular data session..."
