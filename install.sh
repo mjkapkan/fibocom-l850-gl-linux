@@ -36,6 +36,31 @@ EOF
 udevadm control --reload-rules
 udevadm trigger
 
+# Install systemd-sleep hook for automatic hardware recovery after sleep/suspend
+echo "Installing sleep/resume recovery hook (/usr/lib/systemd/system-sleep/wwan-resume)..."
+mkdir -p /usr/lib/systemd/system-sleep
+cat << 'EOF' > /usr/lib/systemd/system-sleep/wwan-resume
+#!/bin/bash
+case "$1/$2" in
+  post/*)
+    SLOT=$(lspci -Dn -d 8086:7360 2>/dev/null | cut -f1 -d" " || echo "0000:05:00.0")
+    if [ -d "/sys/bus/pci/drivers/iosm/${SLOT}" ]; then
+      echo "${SLOT}" > /sys/bus/pci/drivers/iosm/unbind || true
+      sleep 1
+    fi
+    if [ -f "/sys/bus/pci/devices/${SLOT}/reset_method" ]; then
+      echo "acpi" > "/sys/bus/pci/devices/${SLOT}/reset_method" || true
+    fi
+    if [ -f "/sys/bus/pci/devices/${SLOT}/reset" ]; then
+      echo 1 > "/sys/bus/pci/devices/${SLOT}/reset" || true
+    fi
+    sleep 3
+    echo "${SLOT}" > /sys/bus/pci/drivers/iosm/bind || true
+    ;;
+esac
+EOF
+chmod +x /usr/lib/systemd/system-sleep/wwan-resume
+
 # 3. Install application to /opt/fibocom-l850-gl
 INSTALL_DIR="/opt/fibocom-l850-gl"
 echo "Installing files to ${INSTALL_DIR}..."
