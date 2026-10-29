@@ -73,7 +73,29 @@ connect-cellular -a your.carrier.apn
 disconnect-cellular
 ```
 
-### 3. Desktop System Tray Applet
+### 3. SMS & USSD Manager (`cellular-sms`)
+Manage SMS messages and carrier USSD codes directly from your terminal:
+
+```bash
+# List all messages in inbox
+cellular-sms list
+
+# Read specific message by ID
+cellular-sms read 1
+
+# Send an SMS
+cellular-sms send +37060000000 "Hello from Linux!"
+
+# Delete an SMS by ID
+cellular-sms delete 1
+
+# Query carrier USSD (balance, data plan, etc.)
+cellular-sms ussd "*245#"
+```
+
+> **Note on Voice Calls:** Laptop M.2 WWAN slots (including Lenovo ThinkPads) do not have analog or digital audio lines routed to the laptop's sound card/speakers. While the modem can initiate dialing (`cellular-sms dial <number>`), traditional cellular voice audio cannot be piped to the laptop speakers or microphone. Voice calls should be made using VoIP (WhatsApp, Telegram, Skype, SIP) over the active LTE data link.
+
+### 4. Desktop System Tray Applet
 The tray applet starts automatically upon login. You can also start it manually at any time:
 ```bash
 cellular-tray.py &

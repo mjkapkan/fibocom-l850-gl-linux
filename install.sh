@@ -26,11 +26,12 @@ fi
 # Ensure python libraries via pip as fallback
 pip3 install pyroute2 configargparse dbus-python --break-system-packages >/dev/null 2>&1 || true
 
-# 2. Install PCIe Runtime Power Management fix
-# Prevents modem firmware from crashing in A-ROM/CD_READY phase after sleep/suspend
+# 2. Install PCIe Runtime Power Management & dialout permissions fix
 echo "Installing PCIe Runtime Power Management fix (/etc/udev/rules.d/99-wwan-nopm.rules)..."
 cat << 'EOF' > /etc/udev/rules.d/99-wwan-nopm.rules
 ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x8086", ATTR{device}=="0x7360", ATTR{power/control}="on"
+SUBSYSTEM=="wwan", GROUP="dialout", MODE="0660"
+SUBSYSTEM=="net", KERNEL=="wwan*", GROUP="dialout", MODE="0660"
 EOF
 
 udevadm control --reload-rules
@@ -69,16 +70,19 @@ mkdir -p "${INSTALL_DIR}"
 cp -r "${SCRIPT_DIR}/connect.sh" "${INSTALL_DIR}/"
 cp -r "${SCRIPT_DIR}/disconnect.sh" "${INSTALL_DIR}/"
 cp -r "${SCRIPT_DIR}/cellular-tray.py" "${INSTALL_DIR}/"
+cp -r "${SCRIPT_DIR}/cellular-sms.py" "${INSTALL_DIR}/"
 cp -r "${SCRIPT_DIR}/rpc" "${INSTALL_DIR}/"
 
 chmod +x "${INSTALL_DIR}/connect.sh"
 chmod +x "${INSTALL_DIR}/disconnect.sh"
 chmod +x "${INSTALL_DIR}/cellular-tray.py"
+chmod +x "${INSTALL_DIR}/cellular-sms.py"
 
 # Create symlinks in /usr/local/bin
 ln -sf "${INSTALL_DIR}/connect.sh" /usr/local/bin/connect-cellular
 ln -sf "${INSTALL_DIR}/disconnect.sh" /usr/local/bin/disconnect-cellular
 ln -sf "${INSTALL_DIR}/cellular-tray.py" /usr/local/bin/cellular-tray.py
+ln -sf "${INSTALL_DIR}/cellular-sms.py" /usr/local/bin/cellular-sms
 
 # 4. Install global system tray autostart entry
 echo "Installing desktop autostart entry..."
