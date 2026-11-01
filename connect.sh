@@ -33,6 +33,48 @@ except Exception:
 " >/dev/null 2>&1
 }
 
+# Function: Put the modem back on automatic network registration. A modem left
+# deregistered (+COPS: 2) refuses the RPC attach, and keeps that across reboots.
+ensure_auto_registration() {
+  python3 -c "
+import os, re, sys, time
+
+def at(fd, cmd, timeout):
+    os.write(fd, (cmd + '\r\n').encode())
+    buf, end = b'', time.time() + timeout
+    while time.time() < end:
+        try:
+            buf += os.read(fd, 4096)
+            if b'OK\r\n' in buf or b'ERROR' in buf:
+                break
+        except BlockingIOError:
+            time.sleep(0.05)
+    return buf.decode(errors='replace')
+
+for port in ('/dev/wwan0at0', '/dev/wwan0at1'):
+    try:
+        fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+    except OSError:
+        continue
+    try:
+        if 'OK' not in at(fd, 'AT', 2):
+            continue
+        m = re.search(r'\+COPS:\s*(\d)', at(fd, 'AT+COPS?', 5))
+        if not m or m.group(1) != '2':
+            sys.exit(0)
+        print('Modem is deregistered from the network (+COPS: 2), switching to automatic registration...')
+        resp = at(fd, 'AT+COPS=0', 60)
+        if 'OK' in resp:
+            sys.exit(0)
+        print('WARNING: AT+COPS=0 failed: ' + ' '.join(resp.split()))
+        sys.exit(1)
+    finally:
+        os.close(fd)
+print('WARNING: No modem AT port answered; could not check network registration mode.')
+sys.exit(1)
+" || true
+}
+
 # Function: Safe unbind/bind recovery
 recover_modem() {
   echo "Attempting driver unbind/bind re-initialization..."
@@ -121,6 +163,8 @@ echo "Using APN: $APN"
 
 # Ensure required python dependencies
 pip3 install pyroute2 configargparse dbus-python --break-system-packages >/dev/null 2>&1 || true
+
+ensure_auto_registration
 
 # Execute proprietary RPC connection sequence
 echo "Negotiating cellular data session..."
