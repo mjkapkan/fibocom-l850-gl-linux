@@ -52,20 +52,30 @@ sudo ./install.sh
 2. Installs required Python dependencies (`pyroute2`, `configargparse`, `dbus-python`, `PyQt5`).
 3. Installs the connection tool to `/opt/fibocom-l850-gl/` and symlinks helper binaries to `/usr/local/bin/`.
 4. Installs the desktop autostart entry so the cellular system tray indicator launches automatically when you log into your desktop.
+5. Asks for your APN once, saves it to `/etc/default/fibocom-l850-gl`, and enables `cellular-connect.service`, which connects automatically at boot and again after resume from sleep.
 
 ---
 
 ## Usage
 
 ### 1. Connect to Cellular
+The modem connects by itself at boot and after resume (`cellular-connect.service`). To connect by hand:
 ```bash
 connect-cellular
 ```
-The script will prompt for your mobile carrier's **APN** (default: `internet`).
+The APN comes from `/etc/default/fibocom-l850-gl` (`APN=...`). Without that file the script prompts for it (default: `internet`).
 
-You can also pass your APN directly without prompts:
+You can also pass your APN directly:
 ```bash
 connect-cellular -a your.carrier.apn
+```
+
+Check or control the automatic connection:
+```bash
+systemctl status cellular-connect      # last attempt and its result
+journalctl -u cellular-connect -b      # full log for this boot
+sudo systemctl restart cellular-connect
+sudo systemctl disable cellular-connect   # stop connecting automatically
 ```
 
 ### 2. Disconnect
@@ -105,6 +115,15 @@ cellular-tray.py &
 - **Signal Icon:** Displays native cellular signal bars when connected, or offline icon when disconnected.
 - **Tooltip:** Hover over the icon to see connection status and assigned IP address.
 - **Context Menu:** Click to view status, connect, or disconnect.
+
+---
+
+## Troubleshooting
+
+### "The modem's radio is switched off at the modem level (+COPS: 2)"
+On a dual-boot laptop, turning **Cellular off in Windows** (or leaving it off) is stored *in the modem itself*. Under Linux the modem then reports its radio as on, but stays deregistered (`+COPS: 2`) and refuses to search for a network (`AT+COPS=0` answers `NO NETWORK SERVICE` instantly). Reboots and cold power-offs do not clear it, and nothing on the Linux side can switch it back on.
+
+Fix: boot Windows, turn Cellular on (Settings → Network & internet → Cellular), check that it connects, then shut down and boot Linux again. `connect-cellular` detects this state and prints this advice instead of retrying (exit code 3).
 
 ---
 

@@ -99,14 +99,34 @@ Categories=Network;System;
 X-KDE-autostart-after=panel
 EOF
 
+# 5. Auto-connect at boot and after resume
+CONFIG_FILE="/etc/default/fibocom-l850-gl"
+if [ ! -f "${CONFIG_FILE}" ]; then
+  APN=""
+  if [ -t 0 ]; then
+    read -r -p "Enter your mobile carrier's APN for auto-connect [default: internet]: " APN || true
+  fi
+  echo "Saving APN to ${CONFIG_FILE}..."
+  printf 'APN=%s\n' "${APN:-internet}" > "${CONFIG_FILE}"
+fi
+
+echo "Installing auto-connect service (cellular-connect.service)..."
+cp "${SCRIPT_DIR}/cellular-connect.service" /etc/systemd/system/cellular-connect.service
+systemctl daemon-reload
+systemctl enable cellular-connect.service
+
 echo "=================================================="
 echo "Installation complete!"
 echo ""
 echo "Commands available:"
-echo "  connect-cellular       - Connect to mobile network (prompts for APN)"
+echo "  connect-cellular       - Connect to mobile network (APN from ${CONFIG_FILE})"
 echo "  connect-cellular -a APN - Connect directly with specified APN"
 echo "  disconnect-cellular    - Disconnect mobile connection"
 echo "  cellular-tray.py       - Launch desktop system tray status indicator"
+echo ""
+echo "The modem now connects automatically at boot and after resume."
+echo "  Status/log:  systemctl status cellular-connect; journalctl -u cellular-connect"
+echo "  Turn off:    sudo systemctl disable cellular-connect"
 echo ""
 echo "IMPORTANT REQUIREMENTS:"
 echo "1. SIM PIN: You MUST disable the SIM PIN (using a phone or Windows)."
