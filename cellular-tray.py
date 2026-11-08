@@ -2,7 +2,7 @@
 """
 Cellular LTE system tray indicator for the Fibocom L850-GL / Intel XMM7360 on Linux.
 
-- Signal bars from the modem's own measurements (AT+XCESQ: RSRP/RSRQ/SINR on LTE,
+- Signal bars from the modem's serving-cell measurements (AT+XMCI: RSRP/RSRQ/SINR on LTE,
   RSCP/Ec/No on 3G), plus access technology and operator (AT+COPS?)
 - Live throughput and data used on wwan0
 - State of the automatic connection (cellular-connect.service), including a modem
@@ -205,6 +205,52 @@ def parse_xcesq(resp):
     if 0 <= rxlev <= 63:
         out["rxlev"] = rxlev - 111
     return out
+
+
+def parse_xmci(resp):
+    """Serving-cell measurements from Intel +XMCI lines.
+
+    +XMCI: <type>,<mcc>,<mnc>,<tac>,<ci>,<pci>,<dl-arfcn>,<ul-arfcn>,<pathloss>,
+           <rsrp|rscp|rxlev>,<rsrq|ecno|ber>,<sinr>,...
+    type 4 = LTE serving cell, 2 = UMTS serving, 0 = GSM serving; odd types are
+    neighbours. The values use the same 3GPP index scales as +CESQ. On the
+    L850-GL in PCIe mode this is the only AT source with real numbers:
+    +CSQ/+CESQ/+XCESQ report "not measured" even while connected.
+    """
+    for m in re.finditer(r"\+XMCI:\s*(\d+),([^\r\n]*)", resp):
+        kind = int(m.group(1))
+        fields = [f.strip().strip('"') for f in m.group(2).split(",")]
+        if kind not in (0, 2, 4) or len(fields) < 11:
+            continue
+        try:
+            level, quality = int(fields[8]), int(fields[9])
+            sinr = int(fields[10]) if kind == 4 else 255
+        except ValueError:
+            continue
+        out = {}
+        if kind == 4:
+            if 0 <= level <= 97:
+                out["rsrp"] = level - 141
+            if 0 <= quality <= 34:
+                out["rsrq"] = quality / 2 - 20
+            if -100 <= sinr <= 100 and out:
+                out["sinr"] = sinr / 2
+        elif kind == 2:
+            if 0 <= level <= 96:
+                out["rscp"] = level - 121
+            if 0 <= quality <= 49:
+                out["ecno"] = quality / 2 - 24.5
+        elif 0 <= level <= 63:
+            out["rxlev"] = level - 111
+        if out:
+            return out
+    return {}
+
+
+def parse_band(resp):
+    """+XREG: <n>,<stat>,BAND_LTE_1,... -> 'band 1'."""
+    m = re.search(r"BAND_[A-Z]+_(\d+)", resp)
+    return f"band {m.group(1)}" if m else ""
 
 
 def signal_percent(sig):
@@ -442,7 +488,10 @@ class ModemPoller(threading.Thread):
                 sim = re.search(r"\+CPIN:\s*([^\r\n]+)", s.cmd("AT+CPIN?"))
                 snap["sim"] = sim.group(1).strip() if sim else "unknown"
                 snap["cops"] = parse_cops(s.cmd("AT+COPS?"))
-                snap["signal"] = parse_xcesq(s.cmd("AT+XCESQ?"))
+                # AT+XMCI=0 answers with the cell measurements and keeps periodic
+                # reports off; +XCESQ? is a fallback for firmware that fills it in.
+                snap["signal"] = parse_xmci(s.cmd("AT+XMCI=0")) or parse_xcesq(s.cmd("AT+XCESQ?"))
+                snap["band"] = parse_band(s.cmd("AT+XREG?"))
                 used = parse_cpms_used(s.cmd("AT+CPMS?"))
                 if used is not None:
                     with self._count_lock:
@@ -735,6 +784,8 @@ class CellularTrayApp:
         sig = snap.get("signal") or {}
         pct = signal_percent(sig)
         tech, suffix = ACCESS_TECH.get(cops.get("act"), ("", ""))
+        if tech and snap.get("band"):
+            tech = f"{tech} {snap['band']}"
         operator = cops.get("operator") or ""
         # Between failed attempts a Restart=on-failure unit is "activating" too,
         # with SubState=auto-restart; only a real run counts as connecting.

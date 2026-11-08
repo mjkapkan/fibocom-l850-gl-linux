@@ -112,7 +112,7 @@ cellular-tray.py &
 ```
 
 **Features:**
-- **Real signal bars:** taken from the modem's own measurements (`AT+XCESQ`: RSRP on LTE, RSCP on 3G), refreshed every 10 seconds, with the access technology (LTE / 3G / HSPA) and operator name. The menu shows the raw values (RSRP, RSRQ, SINR).
+- **Real signal bars:** taken from the modem's serving-cell measurements (`AT+XMCI`: RSRP on LTE, RSCP on 3G; `+CSQ`/`+CESQ` report nothing on this modem in PCIe mode), refreshed every 10 seconds, with the access technology, LTE band and operator name. The menu shows the raw values (RSRP, RSRQ, SINR).
 - **Throughput:** live download/upload rate and data used on `wwan0`.
 - **Connection state:** Connected, Connecting (the automatic service is running), Disconnected, or a warning when the modem's radio was switched off from Windows (see Troubleshooting), with a desktop notification.
 - **SMS:** inbox (read, send, delete) and a desktop notification when a new message arrives. Sending is plain text, up to 160 characters.
