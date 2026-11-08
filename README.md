@@ -48,24 +48,34 @@ sudo ./install.sh
 ```
 
 ### What `install.sh` does:
-1. Installs the PCIe power management udev rule (`/etc/udev/rules.d/99-wwan-nopm.rules`) to keep the modem's PCIe link active, permanently preventing sleep/resume crashes.
+1. Installs the PCIe power management udev rule (`/etc/udev/rules.d/99-wwan-nopm.rules`) to keep the modem's PCIe link active, permanently preventing sleep/resume crashes. It also lets the `dialout` group use the modem's AT ports (`99-wwan-at-ports.rules`) and adds you to that group, so the tray and `cellular-sms` work without sudo. The RPC port that sets up the data session stays root-only.
 2. Installs required Python dependencies (`pyroute2`, `configargparse`, `dbus-python`, `PyQt5`).
 3. Installs the connection tool to `/opt/fibocom-l850-gl/` and symlinks helper binaries to `/usr/local/bin/`.
 4. Installs the desktop autostart entry so the cellular system tray indicator launches automatically when you log into your desktop.
+5. Asks for your APN once, saves it to `/etc/default/fibocom-l850-gl`, and enables `cellular-connect.service`, which connects automatically at boot and again after resume from sleep.
 
 ---
 
 ## Usage
 
 ### 1. Connect to Cellular
+The modem connects by itself at boot and after resume (`cellular-connect.service`). To connect by hand:
 ```bash
 connect-cellular
 ```
-The script will prompt for your mobile carrier's **APN** (default: `internet`).
+The APN comes from `/etc/default/fibocom-l850-gl` (`APN=...`). Without that file the script prompts for it (default: `internet`).
 
-You can also pass your APN directly without prompts:
+You can also pass your APN directly:
 ```bash
 connect-cellular -a your.carrier.apn
+```
+
+Check or control the automatic connection:
+```bash
+systemctl status cellular-connect      # last attempt and its result
+journalctl -u cellular-connect -b      # full log for this boot
+sudo systemctl restart cellular-connect
+sudo systemctl disable cellular-connect   # stop connecting automatically
 ```
 
 ### 2. Disconnect
@@ -84,13 +94,13 @@ cellular-sms list
 cellular-sms read 1
 
 # Send an SMS
-cellular-sms send +37060000000 "Hello from Linux!"
+cellular-sms send +15555550123 "Hello from Linux!"
 
 # Delete an SMS by ID
 cellular-sms delete 1
 
 # Query carrier USSD (balance, data plan, etc.)
-cellular-sms ussd "*245#"
+cellular-sms ussd "*100#"
 ```
 
 > **Note on Voice Calls:** Laptop M.2 WWAN slots (including Lenovo ThinkPads) do not have analog or digital audio lines routed to the laptop's sound card/speakers. While the modem can initiate dialing (`cellular-sms dial <number>`), traditional cellular voice audio cannot be piped to the laptop speakers or microphone. Voice calls should be made using VoIP (WhatsApp, Telegram, Skype, SIP) over the active LTE data link.
@@ -102,9 +112,23 @@ cellular-tray.py &
 ```
 
 **Features:**
-- **Signal Icon:** Displays native cellular signal bars when connected, or offline icon when disconnected.
-- **Tooltip:** Hover over the icon to see connection status and assigned IP address.
-- **Context Menu:** Click to view status, connect, or disconnect.
+- **Real signal bars:** taken from the modem's serving-cell measurements (`AT+XMCI`: RSRP on LTE, RSCP on 3G; `+CSQ`/`+CESQ` report nothing on this modem in PCIe mode), refreshed every 10 seconds, with the access technology, LTE band and operator name. The menu shows the raw values (RSRP, RSRQ, SINR).
+- **Throughput:** live download/upload rate and data used on `wwan0`.
+- **Connection state:** Connected, Connecting (the automatic service is running), Disconnected, or a warning when the modem's radio was switched off from Windows (see Troubleshooting), with a desktop notification.
+- **SMS:** inbox (read, send, delete) and a desktop notification when a new message arrives. Sending is plain text, up to 160 characters.
+- **Phone & USSD:** balance/account USSD codes and dialing.
+- **Connect / Disconnect:** Connect starts `cellular-connect.service` (asks for your password).
+
+The signal, SMS and USSD features need access to `/dev/wwan0at*` (see `install.sh`); without it the tray still shows the connection and throughput. The tray, `cellular-sms` and `connect-cellular` lock the AT port while they use it, so they never garble each other's commands.
+
+---
+
+## Troubleshooting
+
+### "The modem's radio is switched off at the modem level (+COPS: 2)"
+On a dual-boot laptop, turning **Cellular off in Windows** (or leaving it off) is stored *in the modem itself*. Under Linux the modem then reports its radio as on, but stays deregistered (`+COPS: 2`) and refuses to search for a network (`AT+COPS=0` answers `NO NETWORK SERVICE` instantly). Reboots and cold power-offs do not clear it, and nothing on the Linux side can switch it back on.
+
+Fix: boot Windows, turn Cellular on (Settings → Network & internet → Cellular), check that it connects, then shut down and boot Linux again. `connect-cellular` detects this state and prints this advice instead of retrying (exit code 3).
 
 ---
 

@@ -1,16 +1,80 @@
 #!/bin/bash
 # ==============================================================================
 # Fibocom L850-GL / Intel XMM7360 Cellular Connection Script
+#
+# Usage: connect-cellular [-a APN]
+#
+# The APN comes from -a, else from APN= in /etc/default/fibocom-l850-gl, else
+# from a prompt (interactive runs only), else defaults to "internet". This lets
+# the cellular-connect systemd service run it unattended at boot and on resume.
+#
+# Exit codes: 0 connected (or another attempt is already running)
+#             1 failed
+#             3 the modem's radio is switched off at the modem level, e.g. by
+#               turning Cellular off in Windows; retrying cannot help
 # ==============================================================================
 
 set -e
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve symlinks: this runs as /usr/local/bin/connect-cellular, but rpc/ lives
+# next to the real file in /opt/fibocom-l850-gl.
+SCRIPT_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+CONFIG_FILE="/etc/default/fibocom-l850-gl"
 
 # Ensure root privileges
 if [ "$EUID" -ne 0 ]; then
   echo "Root privileges required to manage cellular connection. Prompting for sudo..."
   exec sudo "$0" "$@"
+fi
+
+# Parse APN argument
+APN=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -a|--apn)
+      APN="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+
+if [ -z "$APN" ] && [ -r "$CONFIG_FILE" ]; then
+  APN="$(sed -n 's/^APN=//p' "$CONFIG_FILE" | tail -n 1 | tr -d "\"'")"
+fi
+
+if [ -z "$APN" ] && [ -t 0 ]; then
+  read -r -p "Enter your mobile carrier's APN [default: internet]: " USER_INPUT || true
+  APN="${USER_INPUT:-}"
+fi
+APN="${APN:-internet}"
+
+# Link up, an IPv4 address and a default route through wwan0.
+is_connected() {
+  local flags
+  flags="$(cat /sys/class/net/wwan0/flags 2>/dev/null || echo 0)"
+  [ $(( flags & 1 )) -eq 1 ] &&
+    ip -4 -o addr show dev wwan0 2>/dev/null | grep -q ' inet ' &&
+    ip route show default dev wwan0 2>/dev/null | grep -q .
+}
+
+# One connection attempt at a time: the boot service, the tray and a terminal
+# must not drive the modem's RPC port concurrently. Wait for a running attempt
+# rather than skipping, so a skipped run is never recorded as a success.
+exec 9>/run/fibocom-l850-gl-connect.lock
+if ! flock -n 9; then
+  echo "Another cellular connection attempt is running; waiting for it to finish..."
+  if ! flock -w 240 9; then
+    echo "ERROR: the other connection attempt did not finish within 4 minutes."
+    exit 1
+  fi
+fi
+
+if is_connected; then
+  echo "Cellular is already connected (wwan0 is up with an address and a default route)."
+  exit 0
 fi
 
 echo "=================================================="
@@ -31,6 +95,47 @@ try:
 except Exception:
     sys.exit(1)
 " >/dev/null 2>&1
+}
+
+# Function: After the network never allowed the attach, read the modem's
+# registration state (read-only). Returns 3 when the modem is deregistered
+# (+COPS: 2) with its radio on: the modem refuses to search at all. That is the
+# state Windows leaves behind when Cellular is turned off there, because Windows
+# stores the setting in the modem; nothing on the Linux side switches it back.
+diagnose_no_attach() {
+  python3 - <<'PYEOF'
+import fcntl, os, re, sys, time
+
+def at(fd, cmd, timeout):
+    os.write(fd, (cmd + '\r\n').encode())
+    buf, end = b'', time.time() + timeout
+    while time.time() < end:
+        try:
+            buf += os.read(fd, 4096)
+            if b'OK\r\n' in buf or b'ERROR' in buf:
+                break
+        except BlockingIOError:
+            time.sleep(0.05)
+    return ' '.join(buf.decode(errors='replace').split())
+
+for port in ('/dev/wwan0at1', '/dev/wwan0at0'):
+    try:
+        fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+    except OSError:
+        continue
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)  # same lock as the tray and cellular-sms
+        if 'OK' not in at(fd, 'AT', 2):
+            continue
+        cops, cereg = at(fd, 'AT+COPS?', 5), at(fd, 'AT+CEREG?', 5)
+        print('Modem registration state: %s | %s' % (cops, cereg))
+        m = re.search(r'\+COPS:\s*(\d)', cops)
+        sys.exit(3 if m and m.group(1) == '2' else 0)
+    finally:
+        os.close(fd)
+print('No modem AT port answered; cannot read the registration state.')
+sys.exit(0)
+PYEOF
 }
 
 # Function: Safe unbind/bind recovery
@@ -82,9 +187,11 @@ EOF
   chmod +x /usr/lib/systemd/system-sleep/wwan-resume
 fi
 
-# 2. Ensure ModemManager does not interfere
+# 2. Ensure ModemManager does not interfere (mask only once: masking reloads systemd)
 systemctl stop ModemManager >/dev/null 2>&1 || true
-systemctl mask ModemManager >/dev/null 2>&1 || true
+if [ "$(systemctl is-enabled ModemManager 2>/dev/null)" != "masked" ]; then
+  systemctl mask ModemManager >/dev/null 2>&1 || true
+fi
 
 # 3. Check if device exists and is responsive
 if [ ! -c /dev/wwan0xmmrpc0 ] || ! check_rpc_port; then
@@ -98,34 +205,27 @@ if ! check_rpc_port; then
   exit 1
 fi
 
-# Parse APN argument or prompt user
-APN=""
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    -a|--apn)
-      APN="$2"
-      shift 2
-      ;;
-    *)
-      shift
-      ;;
-  esac
-done
-
-if [ -z "$APN" ]; then
-  read -p "Enter your mobile carrier's APN [default: internet]: " USER_INPUT
-  APN="${USER_INPUT:-internet}"
-fi
-
 echo "Using APN: $APN"
-
-# Ensure required python dependencies
-pip3 install pyroute2 configargparse dbus-python --break-system-packages >/dev/null 2>&1 || true
 
 # Execute proprietary RPC connection sequence
 echo "Negotiating cellular data session..."
-if ! python3 "${SCRIPT_DIR}/rpc/open_xdatachannel.py" --apn "$APN" --metric 700; then
+rc=0
+python3 "${SCRIPT_DIR}/rpc/open_xdatachannel.py" --apn "$APN" --metric 700 || rc=$?
+if [ "$rc" -ne 0 ]; then
   echo "=================================================="
+  if [ "$rc" -eq 4 ]; then
+    diag=0
+    diagnose_no_attach || diag=$?
+    if [ "$diag" -eq 3 ]; then
+      echo "ERROR: The modem's radio is switched off at the modem level (+COPS: 2),"
+      echo "so it will not search for a network."
+      echo "This happens when Cellular is turned off in Windows: Windows stores that"
+      echo "setting in the modem, and this script cannot switch it back on."
+      echo "Fix: boot Windows, turn Cellular on (Settings > Network & internet >"
+      echo "Cellular), check that it connects, then shut down and boot Linux again."
+      exit 3
+    fi
+  fi
   echo "ERROR: Failed to establish data session with carrier."
   echo "Please verify your SIM card, APN settings, and network coverage."
   exit 1

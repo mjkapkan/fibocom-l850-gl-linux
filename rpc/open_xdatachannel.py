@@ -5,6 +5,7 @@ from pyroute2 import IPRoute
 import os
 from os.path import join, abspath, dirname
 import uuid
+import select
 import socket
 import struct
 import dbus
@@ -33,6 +34,9 @@ parser.add_argument('-m', '--metric', type=int, default=1000,
                     help="Metric for default route (higher is lower priority)")
 parser.add_argument('-t', '--ip-fetch-timeout', type=int, default=1,
                     help="Retry interval in seconds when getting IP config")
+parser.add_argument('--attach-timeout', type=int, default=60,
+                    help="Seconds to wait for the network to allow attach after a refused first attempt "
+                         "(exit code 4 when it never does)")
 parser.add_argument('-r', '--noresolv', action="store_true",
                     help="Don't add modem-provided DNS servers to /etc/resolv.conf")
 parser.add_argument('-d', '--dbus', action="store_true",
@@ -45,7 +49,7 @@ try:
     r = rpc.XMMRPC()
 except Exception as ex:
     logging.error(ex)
-    exit()
+    sys.exit(1)
 
 ipr = IPRoute()
 
@@ -71,7 +75,15 @@ _, status = rpc.unpack('nn', attach['body'])
 if status == 0xffffffff:
     logging.info("Attach failed - waiting to see if we just weren't ready")
 
+    deadline = time.time() + cfg.attach_timeout
     while not r.attach_allowed:
+        # Check the deadline every time round: a modem that keeps sending
+        # indications would otherwise keep select() returning ready forever.
+        remaining = deadline - time.time()
+        if remaining <= 0 or not select.select([r.fp], [], [], remaining)[0]:
+            logging.error("Network did not allow attach within %ds (is the modem registered? see AT+COPS?), giving up" % cfg.attach_timeout)
+            # Distinct code so connect.sh can tell "network never allowed attach" from other failures.
+            sys.exit(4)
         r.pump()
 
     attach = r.execute('UtaMsNetAttachReq',

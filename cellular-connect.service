@@ -1,0 +1,27 @@
+[Unit]
+Description=Cellular LTE connection (Fibocom L850-GL / Intel XMM7360)
+Documentation=https://github.com/mjkapkan/fibocom-l850-gl-linux
+# Started whenever the modem's network interface appears (see [Install]): at boot,
+# and again after the sleep hook rebinds the driver on resume. Deliberately not
+# BindsTo= the device: connect.sh resets the modem itself when it is stuck, which
+# briefly removes wwan0, and that must not kill the attempt doing the reset.
+After=sys-subsystem-net-devices-wwan0.device NetworkManager.service systemd-resolved.service
+# No start limit: a bad patch of coverage must not stop a later resume from
+# starting a fresh attempt. RestartSec below spaces out the retries instead.
+StartLimitIntervalSec=0
+
+[Service]
+# Not RemainAfterExit: the unit must be inactive again after each attempt, so the
+# next appearance of wwan0 (resume) starts a fresh connection.
+Type=oneshot
+ExecStart=/opt/fibocom-l850-gl/connect.sh
+StandardInput=null
+TimeoutStartSec=5min
+# Keep retrying while it fails (e.g. no coverage), every ~2 minutes.
+Restart=on-failure
+RestartSec=2min
+# 3 = radio switched off at the modem level (e.g. from Windows); retrying cannot help.
+RestartPreventExitStatus=3
+
+[Install]
+WantedBy=sys-subsystem-net-devices-wwan0.device
