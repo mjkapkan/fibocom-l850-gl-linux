@@ -35,7 +35,8 @@ parser.add_argument('-m', '--metric', type=int, default=1000,
 parser.add_argument('-t', '--ip-fetch-timeout', type=int, default=1,
                     help="Retry interval in seconds when getting IP config")
 parser.add_argument('--attach-timeout', type=int, default=60,
-                    help="Seconds to wait for the network to allow attach after a refused first attempt")
+                    help="Seconds to wait for the network to allow attach after a refused first attempt "
+                         "(exit code 4 when it never does)")
 parser.add_argument('-r', '--noresolv', action="store_true",
                     help="Don't add modem-provided DNS servers to /etc/resolv.conf")
 parser.add_argument('-d', '--dbus', action="store_true",
@@ -78,7 +79,8 @@ if status == 0xffffffff:
     while not r.attach_allowed:
         if not select.select([r.fp], [], [], max(0, deadline - time.time()))[0]:
             logging.error("Network did not allow attach within %ds (is the modem registered? see AT+COPS?), giving up" % cfg.attach_timeout)
-            sys.exit(1)
+            # Distinct code so connect.sh can tell "network never allowed attach" from other failures.
+            sys.exit(4)
         r.pump()
 
     attach = r.execute('UtaMsNetAttachReq',
