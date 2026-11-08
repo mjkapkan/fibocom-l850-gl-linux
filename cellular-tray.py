@@ -356,7 +356,7 @@ def link_info():
 def service_state():
     with contextlib.suppress(Exception):
         out = subprocess.run(
-            ["systemctl", "show", SERVICE, "-p", "LoadState,ActiveState,Result,ExecMainStatus"],
+            ["systemctl", "show", SERVICE, "-p", "LoadState,ActiveState,SubState,Result,ExecMainStatus"],
             capture_output=True, text=True, timeout=3).stdout
         return dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
     return {}
@@ -406,12 +406,23 @@ class ModemPoller(threading.Thread):
         self.at = at
         self.snapshot = {}
         self.new_sms = queue.Queue()
+        # Messages we notified about. Listing them marks them read on the modem,
+        # so the inbox shows these as NEW until they are opened.
+        self.notified_ids = set()
         self._wake = threading.Event()
+        self._count_lock = threading.Lock()
         self._sms_count = None
         self._configured_generation = None
 
     def poll_soon(self):
         self._wake.set()
+
+    def note_deleted(self):
+        """The inbox deleted a message: lower the baseline, so a message that
+        arrives before the next poll still shows up as an increase."""
+        with self._count_lock:
+            if self._sms_count:
+                self._sms_count -= 1
 
     def run(self):
         while True:
@@ -434,11 +445,14 @@ class ModemPoller(threading.Thread):
                 snap["signal"] = parse_xcesq(s.cmd("AT+XCESQ?"))
                 used = parse_cpms_used(s.cmd("AT+CPMS?"))
                 if used is not None:
-                    if self._sms_count is not None and used > self._sms_count:
+                    with self._count_lock:
+                        grew = self._sms_count is not None and used > self._sms_count
+                        self._sms_count = used
+                    if grew:
                         s.cmd("AT+CMGF=1")
                         for msg in parse_cmgl(s.cmd('AT+CMGL="REC UNREAD"', 10)):
+                            self.notified_ids.add(msg["id"])
                             self.new_sms.put(msg)
-                    self._sms_count = used
         except ModemUnavailable as e:
             snap["error"] = str(e)
         return snap
@@ -448,18 +462,42 @@ class ModemPoller(threading.Thread):
 # Dialogs
 # ----------------------------------------------------------------------------
 
-def busy(fn, *args):
-    QApplication.setOverrideCursor(Qt.WaitCursor)
-    try:
-        return fn(*args)
-    finally:
-        QApplication.restoreOverrideCursor()
+class BackgroundDialog(QDialog):
+    """Dialog whose modem work runs on a thread, so the tray never freezes while
+    it waits for the modem (or for another program holding the AT port)."""
+
+    def run_job(self, fn, args, done):
+        self.setEnabled(False)
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        job = {"result": None, "error": None}
+
+        def work():
+            try:
+                job["result"] = fn(*args)
+            except Exception as e:      # reported to the user in done()
+                job["error"] = e
+
+        thread = threading.Thread(target=work, daemon=True)
+        timer = QTimer(self)
+
+        def check():
+            if thread.is_alive():
+                return
+            timer.stop()
+            QApplication.restoreOverrideCursor()
+            self.setEnabled(True)
+            done(job["result"], job["error"])
+
+        timer.timeout.connect(check)
+        thread.start()
+        timer.start(100)
 
 
-class SMSInboxDialog(QDialog):
-    def __init__(self, at, parent=None):
+class SMSInboxDialog(BackgroundDialog):
+    def __init__(self, at, poller, parent=None):
         super().__init__(parent)
         self.at = at
+        self.poller = poller
         self.messages = []
         self.setWindowTitle("Cellular SMS Messages")
         self.resize(700, 450)
@@ -504,11 +542,13 @@ class SMSInboxDialog(QDialog):
 
     def load_messages(self):
         self.list_widget.clear()
-        try:
-            self.messages = busy(list_sms, self.at)
-        except ModemUnavailable as e:
-            self.messages = []
-            self.body_view.setPlainText(f"Modem not available: {e}")
+        self.body_view.setPlainText("Reading messages...")
+        self.run_job(list_sms, (self.at,), self._show_messages)
+
+    def _show_messages(self, messages, error):
+        self.messages = messages or []
+        if error:
+            self.body_view.setPlainText(f"Modem not available: {error}")
             return
         if not self.messages:
             self.sender_label.setText("<b>From:</b> -")
@@ -518,12 +558,14 @@ class SMSInboxDialog(QDialog):
         for msg in self.messages:
             preview = msg["text"].replace("\n", " ")
             preview = preview[:27] + "..." if len(preview) > 30 else preview
-            self.list_widget.addItem(f"{msg['sender']} - {preview}")
+            new = "NEW · " if msg["id"] in self.poller.notified_ids else ""
+            self.list_widget.addItem(f"{new}{msg['sender']} - {preview}")
         self.list_widget.setCurrentRow(0)
 
     def display_message(self, row):
         if 0 <= row < len(self.messages):
             msg = self.messages[row]
+            self.poller.notified_ids.discard(msg["id"])
             self.sender_label.setText(f"<b>From:</b> {msg['sender']} ({msg['status']})")
             self.date_label.setText(f"<b>Date:</b> {msg['timestamp'] or '-'}")
             self.body_view.setPlainText(msg["text"])
@@ -535,10 +577,10 @@ class SMSInboxDialog(QDialog):
         text, ok = QInputDialog.getMultiLineText(self, "Send SMS", f"Message to {number.strip()} (max 160, plain text):")
         if not ok or not text.strip():
             return
-        try:
-            sent, info = busy(send_sms, self.at, number, text.strip())
-        except ModemUnavailable as e:
-            sent, info = False, f"Modem not available: {e}"
+        self.run_job(send_sms, (self.at, number, text.strip()), self._sent)
+
+    def _sent(self, result, error):
+        sent, info = result if not error else (False, f"Modem not available: {error}")
         if sent:
             QMessageBox.information(self, "SMS", info)
         else:
@@ -551,14 +593,17 @@ class SMSInboxDialog(QDialog):
         msg = self.messages[row]
         if QMessageBox.question(self, "Delete SMS", f"Delete the message from {msg['sender']}?") != QMessageBox.Yes:
             return
-        try:
-            busy(delete_sms, self.at, msg["id"])
-        except ModemUnavailable as e:
-            QMessageBox.critical(self, "Delete SMS", f"Modem not available: {e}")
+        self.run_job(delete_sms, (self.at, msg["id"]), self._deleted)
+
+    def _deleted(self, ok, error):
+        if error:
+            QMessageBox.critical(self, "Delete SMS", f"Modem not available: {error}")
+        elif ok:
+            self.poller.note_deleted()
         self.load_messages()
 
 
-class CallDialog(QDialog):
+class CallDialog(BackgroundDialog):
     def __init__(self, at, parent=None):
         super().__init__(parent)
         self.at = at
@@ -600,26 +645,23 @@ class CallDialog(QDialog):
         close_btn.clicked.connect(self.accept)
         layout.addWidget(close_btn)
 
-    def _run(self, fn, *args):
-        try:
-            return busy(fn, self.at, *args)
-        except ModemUnavailable as e:
-            return f"Modem not available: {e}"
+    def _run(self, fn, args, show):
+        self.run_job(fn, (self.at,) + args,
+                     lambda result, error: show(f"Modem not available: {error}" if error else result))
 
     def query_ussd(self):
         code = self.ussd_input.text().strip()
         if code:
             self.ussd_result.setPlainText("Waiting for the network...")
-            QApplication.processEvents()
-            self.ussd_result.setPlainText(self._run(query_ussd, code))
+            self._run(query_ussd, (code,), self.ussd_result.setPlainText)
 
     def dial(self):
         number = self.dial_input.text().strip()
         if number:
-            QMessageBox.information(self, "Dial", self._run(dial, number))
+            self._run(dial, (number,), lambda text: QMessageBox.information(self, "Dial", text))
 
     def hangup(self):
-        QMessageBox.information(self, "Hang up", self._run(hangup))
+        self._run(hangup, (), lambda text: QMessageBox.information(self, "Hang up", text))
 
 
 # ----------------------------------------------------------------------------
@@ -694,7 +736,11 @@ class CellularTrayApp:
         pct = signal_percent(sig)
         tech, suffix = ACCESS_TECH.get(cops.get("act"), ("", ""))
         operator = cops.get("operator") or ""
-        radio_off = (not connected and svc.get("ActiveState") != "activating"
+        # Between failed attempts a Restart=on-failure unit is "activating" too,
+        # with SubState=auto-restart; only a real run counts as connecting.
+        retrying = svc.get("SubState") == "auto-restart"
+        connecting = svc.get("ActiveState") == "activating" and not retrying
+        radio_off = (not connected and not connecting
                      and svc.get("Result") == "exit-code" and svc.get("ExecMainStatus") == "3")
 
         # Status line and icon
@@ -707,12 +753,15 @@ class CellularTrayApp:
                          f"network-cellular-signal-{word}-symbolic"]
             else:
                 names = ["network-mobile-on", "network-cellular-connected-symbolic"]
-        elif svc.get("ActiveState") == "activating":
+        elif connecting:
             status = "Connecting..."
             names = ["network-mobile-available", "network-cellular-acquiring-symbolic"]
         elif radio_off:
             status = "Radio switched off at the modem (turn Cellular on in Windows)"
             names = ["network-mobile-off", "network-cellular-hardware-disabled-symbolic"]
+        elif retrying:
+            status = "Disconnected (automatic attempt failed, retrying)"
+            names = ["network-mobile-off", "network-cellular-offline-symbolic"]
         elif svc.get("Result") not in (None, "", "success") and svc.get("LoadState") == "loaded":
             status = "Disconnected (last automatic attempt failed)"
             names = ["network-mobile-off", "network-cellular-offline-symbolic"]
@@ -757,7 +806,7 @@ class CellularTrayApp:
         modem_ok = bool(snap) and "error" not in snap
         self.sms_action.setEnabled(modem_ok)
         self.call_action.setEnabled(modem_ok)
-        self.connect_action.setEnabled(not connected and svc.get("ActiveState") != "activating")
+        self.connect_action.setEnabled(not connected and not connecting)
         self.disconnect_action.setEnabled(connected)
 
         # Notifications
@@ -780,7 +829,7 @@ class CellularTrayApp:
                                        QSystemTrayIcon.Information, 10000)
 
     def open_sms_dialog(self):
-        SMSInboxDialog(self.at).exec_()
+        SMSInboxDialog(self.at, self.poller).exec_()
 
     def open_call_dialog(self):
         CallDialog(self.at).exec_()

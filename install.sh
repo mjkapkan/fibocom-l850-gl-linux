@@ -128,6 +128,11 @@ echo "Installing auto-connect service (cellular-connect.service)..."
 cp "${SCRIPT_DIR}/cellular-connect.service" /etc/systemd/system/cellular-connect.service
 systemctl daemon-reload
 systemctl enable cellular-connect.service
+# wwan0 already exists, so its appearance will not trigger the service until the
+# next boot or resume: start it now (a no-op if already connected).
+if [ -e /sys/class/net/wwan0 ]; then
+  systemctl start --no-block cellular-connect.service
+fi
 
 echo "=================================================="
 echo "Installation complete!"

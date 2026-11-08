@@ -77,7 +77,10 @@ if status == 0xffffffff:
 
     deadline = time.time() + cfg.attach_timeout
     while not r.attach_allowed:
-        if not select.select([r.fp], [], [], max(0, deadline - time.time()))[0]:
+        # Check the deadline every time round: a modem that keeps sending
+        # indications would otherwise keep select() returning ready forever.
+        remaining = deadline - time.time()
+        if remaining <= 0 or not select.select([r.fp], [], [], remaining)[0]:
             logging.error("Network did not allow attach within %ds (is the modem registered? see AT+COPS?), giving up" % cfg.attach_timeout)
             # Distinct code so connect.sh can tell "network never allowed attach" from other failures.
             sys.exit(4)

@@ -16,21 +16,15 @@
 
 set -e
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve symlinks: this runs as /usr/local/bin/connect-cellular, but rpc/ lives
+# next to the real file in /opt/fibocom-l850-gl.
+SCRIPT_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
 CONFIG_FILE="/etc/default/fibocom-l850-gl"
 
 # Ensure root privileges
 if [ "$EUID" -ne 0 ]; then
   echo "Root privileges required to manage cellular connection. Prompting for sudo..."
   exec sudo "$0" "$@"
-fi
-
-# One connection attempt at a time: the boot service, the tray and a terminal
-# must not drive the modem's RPC port concurrently.
-exec 9>/run/fibocom-l850-gl-connect.lock
-if ! flock -n 9; then
-  echo "Another cellular connection attempt is already running."
-  exit 0
 fi
 
 # Parse APN argument
@@ -56,6 +50,32 @@ if [ -z "$APN" ] && [ -t 0 ]; then
   APN="${USER_INPUT:-}"
 fi
 APN="${APN:-internet}"
+
+# Link up, an IPv4 address and a default route through wwan0.
+is_connected() {
+  local flags
+  flags="$(cat /sys/class/net/wwan0/flags 2>/dev/null || echo 0)"
+  [ $(( flags & 1 )) -eq 1 ] &&
+    ip -4 -o addr show dev wwan0 2>/dev/null | grep -q ' inet ' &&
+    ip route show default dev wwan0 2>/dev/null | grep -q .
+}
+
+# One connection attempt at a time: the boot service, the tray and a terminal
+# must not drive the modem's RPC port concurrently. Wait for a running attempt
+# rather than skipping, so a skipped run is never recorded as a success.
+exec 9>/run/fibocom-l850-gl-connect.lock
+if ! flock -n 9; then
+  echo "Another cellular connection attempt is running; waiting for it to finish..."
+  if ! flock -w 240 9; then
+    echo "ERROR: the other connection attempt did not finish within 4 minutes."
+    exit 1
+  fi
+fi
+
+if is_connected; then
+  echo "Cellular is already connected (wwan0 is up with an address and a default route)."
+  exit 0
+fi
 
 echo "=================================================="
 echo "Connecting to Cellular (Fibocom L850-GL / XMM7360)"
