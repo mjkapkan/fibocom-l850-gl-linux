@@ -9,8 +9,10 @@ import os
 import time
 import re
 import argparse
+import fcntl
 
-DEFAULT_PORTS = ["/dev/wwan0at0", "/dev/wwan0at1"]
+# On the L850-GL, wwan0at1 answers AT commands; wwan0at0 is often silent.
+DEFAULT_PORTS = ["/dev/wwan0at1", "/dev/wwan0at0"]
 
 
 class ModemAT:
@@ -28,6 +30,9 @@ class ModemAT:
             try:
                 self.fd = os.open(p, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
                 self.port = p
+                # Hold the port for this whole run, so the tray indicator's
+                # polling cannot interleave with our commands.
+                fcntl.flock(self.fd, fcntl.LOCK_EX)
                 # Test with AT command
                 if self._test_at():
                     return
@@ -216,7 +221,7 @@ def main():
 
     # send
     send_p = subparsers.add_parser("send", help="Send an SMS")
-    send_p.add_argument("number", help="Recipient phone number (e.g. +370...)")
+    send_p.add_argument("number", help="Recipient phone number in international format (+<country code><number>)")
     send_p.add_argument("message", help="Message text")
 
     # delete
@@ -224,7 +229,7 @@ def main():
     del_p.add_argument("id", type=int, help="Message ID")
 
     # ussd
-    ussd_p = subparsers.add_parser("ussd", help="Send USSD code (e.g. *245#)")
+    ussd_p = subparsers.add_parser("ussd", help="Send USSD code (e.g. *100#)")
     ussd_p.add_argument("code", help="USSD code string")
 
     # dial / call

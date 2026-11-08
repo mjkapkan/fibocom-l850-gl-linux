@@ -26,16 +26,30 @@ fi
 # Ensure python libraries via pip as fallback
 pip3 install pyroute2 configargparse dbus-python --break-system-packages >/dev/null 2>&1 || true
 
-# 2. Install PCIe Runtime Power Management & dialout permissions fix
+# 2. PCIe runtime power management fix, and AT port access for the tray / cellular-sms
 echo "Installing PCIe Runtime Power Management fix (/etc/udev/rules.d/99-wwan-nopm.rules)..."
 cat << 'EOF' > /etc/udev/rules.d/99-wwan-nopm.rules
 ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x8086", ATTR{device}=="0x7360", ATTR{power/control}="on"
-SUBSYSTEM=="wwan", GROUP="dialout", MODE="0660"
-SUBSYSTEM=="net", KERNEL=="wwan*", GROUP="dialout", MODE="0660"
+EOF
+
+# AT ports only: the RPC port (wwan0xmmrpc0) that sets up the data session stays root-only.
+echo "Allowing group dialout to use the modem's AT ports (/etc/udev/rules.d/99-wwan-at-ports.rules)..."
+cat << 'EOF' > /etc/udev/rules.d/99-wwan-at-ports.rules
+SUBSYSTEM=="wwan", KERNEL=="wwan[0-9]*at[0-9]*", GROUP="dialout", MODE="0660"
 EOF
 
 udevadm control --reload-rules
-udevadm trigger
+udevadm trigger --subsystem-match=wwan
+for dev in /sys/bus/pci/devices/*; do
+  if [ "$(cat "$dev/vendor")" = "0x8086" ] && [ "$(cat "$dev/device")" = "0x7360" ]; then
+    echo on > "$dev/power/control"
+  fi
+done
+
+if [ -n "${SUDO_USER:-}" ] && ! id -nG "${SUDO_USER}" | grep -qw dialout; then
+  usermod -aG dialout "${SUDO_USER}"
+  echo "Added ${SUDO_USER} to group dialout (log out and back in for it to take effect)."
+fi
 
 # Install systemd-sleep hook for automatic hardware recovery across sleep/suspend
 echo "Installing sleep/resume recovery hook (/usr/lib/systemd/system-sleep/wwan-resume)..."

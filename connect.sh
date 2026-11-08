@@ -84,7 +84,7 @@ except Exception:
 # stores the setting in the modem; nothing on the Linux side switches it back.
 diagnose_no_attach() {
   python3 - <<'PYEOF'
-import os, re, sys, time
+import fcntl, os, re, sys, time
 
 def at(fd, cmd, timeout):
     os.write(fd, (cmd + '\r\n').encode())
@@ -104,6 +104,7 @@ for port in ('/dev/wwan0at1', '/dev/wwan0at0'):
     except OSError:
         continue
     try:
+        fcntl.flock(fd, fcntl.LOCK_EX)  # same lock as the tray and cellular-sms
         if 'OK' not in at(fd, 'AT', 2):
             continue
         cops, cereg = at(fd, 'AT+COPS?', 5), at(fd, 'AT+CEREG?', 5)
